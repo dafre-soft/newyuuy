@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>YuuY Chat</title>
+    <link rel="icon" href="/static/favicon.ico">
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <!-- SIDEBAR - Telegram Style -->
+    <div class="sidebar" id="sidebar">
+        <!-- Profile Header -->
+        <div class="profile-header" onclick="openProfile({{ user.id }})">
+            <img src="{{ user.avatar_url }}" class="avatar" id="myAvatar" alt="avatar">
+            <div class="profile-info">
+                <div class="uname">{{ user.display_name }}</div>
+                <div class="urole">{{ user.role }}</div>
+            </div>
+        </div>
+        
+        <!-- Navigation Tabs -->
+        <div class="nav-tabs">
+            <div class="nav-tab active" data-tab="chats" onclick="switchTab('chats', this)">
+                <span class="tab-icon">💬</span>
+                <span class="tab-text">Chats</span>
+            </div>
+            <div class="nav-tab" data-tab="groups" onclick="switchTab('groups', this)">
+                <span class="tab-icon">👥</span>
+                <span class="tab-text">Groups</span>
+            </div>
+            <div class="nav-tab" data-tab="feed" onclick="switchTab('feed', this)">
+                <span class="tab-icon">📰</span>
+                <span class="tab-text">Feed</span>
+            </div>
+            <div class="nav-tab" data-tab="pages" onclick="switchTab('pages', this)">
+                <span class="tab-icon">📄</span>
+                <span class="tab-text">Pages</span>
+            </div>
+        </div>
+        
+        <!-- Search Bar -->
+        <div class="search-container">
+            <input type="text" class="search-input" id="chatSearch" placeholder="Search chats..." oninput="filterChats()">
+        </div>
+        
+        <!-- Chats List (Friends & DMs) - Left Sidebar like Telegram -->
+        <div class="chats-section" id="chatsSection">
+            <div class="section-header">
+                <span class="section-title">Messages</span>
+                <button class="add-btn" onclick="openNewChatModal()" title="New Chat">+</button>
+            </div>
+            <div class="list-container" id="chatList">
+                <!-- Chat items will be loaded here -->
+            </div>
+        </div>
+        
+        <!-- Groups Section -->
+        <div class="groups-section" id="groupsSection" style="display:none;">
+            <div class="section-header">
+                <span class="section-title">Groups</span>
+                <button class="add-btn" onclick="openCreateGroupModal()" title="Create Group">+</button>
+            </div>
+            <div class="list-container" id="groupList">
+                <!-- Group items will be loaded here -->
+            </div>
+        </div>
+        
+        <!-- Feed Section -->
+        <div class="feed-section" id="feedSection" style="display:none;">
+            <div class="section-header">
+                <span class="section-title">News Feed</span>
+            </div>
+            <div class="list-container" id="feedList">
+                <!-- Feed posts will be loaded here -->
+            </div>
+        </div>
+        
+        <!-- Pages Section -->
+        <div class="pages-section" id="pagesSection" style="display:none;">
+            <div class="section-header">
+                <span class="section-title">My Pages</span>
+                <button class="add-btn" onclick="openCreatePageModal()" title="Create Page">+</button>
+            </div>
+            <div class="list-container" id="pagesList">
+                <!-- Pages will be loaded here -->
+            </div>
+        </div>
+        
+        <!-- Sidebar Footer -->
+        <div class="sidebar-footer">
+            <button class="footer-btn" onclick="openModal('editProfile')" title="Edit Profile">✏️</button>
+            {% if user.role == 'admin' %}
+            <a class="footer-btn" href="/admin" title="Admin Panel">⚙️</a>
+            {% endif %}
+            <a class="footer-btn" href="/logout" title="Logout">🚪</a>
+        </div>
+    </div>
+    
+    <!-- MAIN CHAT AREA -->
+    <div class="main-area">
+        <!-- Chat Header -->
+        <div class="chat-header">
+            <div class="header-left">
+                <button class="burger-menu" onclick="toggleSidebar()" title="Menu">☰</button>
+                <div class="chat-info" id="chatInfo">
+                    <img src="/static/default_avatar.png" class="header-avatar" id="headerAvatar" alt="">
+                    <div class="chat-details">
+                        <div class="chat-title" id="chatTitle">Select a chat</div>
+                        <div class="chat-status" id="chatStatus"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="action-btn" onclick="toggleUserTags()" title="Tag Users">@</button>
+                <button class="action-btn" onclick="openNotifications()" title="Notifications">
+                    🔔 <span class="notif-badge" id="notifBadge">0</span>
+                </button>
+                <button class="action-btn" onclick="openProfile(currentChatId)" id="btnViewProfile" title="View Profile" style="display:none;">👤</button>
+                <button class="action-btn" onclick="openGroupSettings()" id="btnGroupSettings" title="Group Settings" style="display:none;">⋮</button>
+            </div>
+        </div>
+        
+        <!-- User Tags Dropdown -->
+        <div class="tags-dropdown" id="tagsDropdown" style="display:none;">
+            <div class="tags-header">Quick Tag Users</div>
+            <div class="tags-list" id="tagsList">
+                <!-- User tags will be loaded here -->
+            </div>
+        </div>
+        
+        <!-- Messages Container -->
+        <div class="messages" id="messagesContainer">
+            <div class="empty-state" id="emptyState">
+                <div class="empty-icon">💬</div>
+                <div class="empty-text">Select a chat to start messaging</div>
+                <div class="empty-hint">Or create a new chat using the + button</div>
+            </div>
+            <!-- Messages will be loaded here -->
+        </div>
+        
+        <!-- Input Bar -->
+        <div class="input-bar" id="inputBar" style="display:none;">
+            <button class="attach-btn" onclick="document.getElementById('fileInput').click()" title="Attach File">📎</button>
+            <input type="file" id="fileInput" multiple style="display:none;" onchange="handleFileUpload(this)">
+            <input type="text" class="message-input" id="messageInput" placeholder="Write a message..." onkeypress="handleKeyPress(event)" autocomplete="off">
+            <button class="emoji-btn" onclick="toggleEmojiPicker()" title="Emoji">😊</button>
+            <button class="send-btn" onclick="sendMessage()" title="Send">➤</button>
+        </div>
+        
+        <!-- Emoji Picker -->
+        <div class="emoji-picker" id="emojiPicker" style="display:none;">
+            <div class="emoji-grid">
+                <!-- Emojis will be loaded here -->
+            </div>
+        </div>
+    </div>
+    
+    <!-- New Chat Modal -->
+    <div class="modal-overlay" id="newChatModal" style="display:none;">
+        <div class="modal">
+            <h3>New Chat</h3>
+            <div class="modal-search">
+                <input type="text" id="userSearchInput" placeholder="Search users or bots..." oninput="searchUsers()">
+            </div>
+            <div class="modal-tabs">
+                <button class="modal-tab active" onclick="showUserType('all')">All</button>
+                <button class="modal-tab" onclick="showUserType('users')">Users</button>
+                <button class="modal-tab" onclick="showUserType('bots')">Bots</button>
+                <button class="modal-tab" onclick="showUserType('create_bot')">+ Create Bot</button>
+            </div>
+            <div class="user-list" id="userSearchResults">
+                <!-- User search results will be loaded here -->
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-secondary" onclick="closeModal('newChatModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Create Bot Modal -->
+    <div class="modal-overlay" id="createBotModal" style="display:none;">
+        <div class="modal">
+            <h3>Create New Bot</h3>
+            <p class="modal-hint">Create your custom bot with API access. Bots can be used for automation, games, and more.</p>
+            
+            <label>Bot Username (starts with @)</label>
+            <input type="text" id="botUsername" placeholder="@mybot" oninput="if(!this.value.startsWith('@'))this.value='@'+this.value">
+            
+            <label>Display Name</label>
+            <input type="text" id="botDisplayName" placeholder="My Awesome Bot">
+            
+            <label>Bio (optional)</label>
+            <textarea id="botBio" rows="3" placeholder="Describe your bot..."></textarea>
+            
+            <label>Avatar (optional)</label>
+            <input type="file" id="botAvatar" accept="image/*">
+            
+            <div class="modal-buttons">
+                <button class="btn-secondary" onclick="closeModal('createBotModal')">Cancel</button>
+                <button class="btn-primary" onclick="createBot()">Create Bot</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Bot Info Modal (after creation) -->
+    <div class="modal-overlay" id="botInfoModal" style="display:none;">
+        <div class="modal">
+            <h3>✅ Bot Created!</h3>
+            <div class="bot-info-card">
+                <div class="bot-token-label">Your Bot API Token:</div>
+                <div class="bot-token" id="botTokenDisplay">bot_xxxxxx...</div>
+                <button class="copy-btn" onclick="copyBotToken()">📋 Copy</button>
+            </div>
+            <p class="modal-hint">Save this token! You'll need it to use the Bot API. Use it with the endpoint at <code>http://localhost:5001</code></p>
+            <div class="api-example">
+                <strong>API Example:</strong>
+                <pre><code>POST http://localhost:5001/api/bot/send
+Headers: X-Bot-Token: your_token
+Body: {"user_id": 5, "content": "Hello!"}</code></pre>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-primary" onclick="closeModal('botInfoModal')">Done</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Edit Profile Modal -->
+    <div class="modal-overlay" id="editProfileModal" style="display:none;">
+        <div class="modal">
+            <h3>Edit Profile</h3>
+            <label>Display Name</label>
+            <input type="text" id="editDisplayName">
+            
+            <label>Bio</label>
+            <textarea id="editBio" rows="3"></textarea>
+            
+            <label>Theme Color</label>
+            <input type="color" id="editThemeColor" value="#a78bfa">
+            
+            <label>Background Color</label>
+            <input type="color" id="editBgColor" value="#0d0a1a">
+            
+            <label>Avatar</label>
+            <input type="file" id="editAvatar" accept="image/*">
+            
+            <div class="modal-buttons">
+                <button class="btn-secondary" onclick="closeModal('editProfileModal')">Cancel</button>
+                <button class="btn-primary" onclick="saveProfile()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Create Group Modal -->
+    <div class="modal-overlay" id="createGroupModal" style="display:none;">
+        <div class="modal">
+            <h3>Create Group</h3>
+            <label>Group Name</label>
+            <input type="text" id="groupName" placeholder="My Awesome Group">
+            
+            <label>Description (optional)</label>
+            <textarea id="groupDescription" rows="3" placeholder="Describe your group..."></textarea>
+            
+            <div class="modal-buttons">
+                <button class="btn-secondary" onclick="closeModal('createGroupModal')">Cancel</button>
+                <button class="btn-primary" onclick="createGroup()">Create Group</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Notifications Modal -->
+    <div class="modal-overlay" id="notificationsModal" style="display:none;">
+        <div class="modal">
+            <h3>Notifications</h3>
+            <div class="notif-list" id="notifList">
+                <!-- Notifications will be loaded here -->
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-secondary" onclick="closeModal('notificationsModal')">Close</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- User Profile Modal -->
+    <div class="modal-overlay" id="userProfileModal" style="display:none;">
+        <div class="modal profile-modal">
+            <div class="profile-header-modal">
+                <img src="" class="profile-avatar" id="profileAvatar" alt="">
+                <div class="profile-info-modal">
+                    <h2 id="profileName"></h2>
+                    <div class="profile-bio" id="profileBio"></div>
+                    <div class="profile-stats" id="profileStats"></div>
+                </div>
+            </div>
+            <div class="profile-actions" id="profileActions">
+                <!-- Action buttons will be loaded here -->
+            </div>
+            <div class="wall-section">
+                <h4>Wall</h4>
+                <div class="wall-input">
+                    <textarea id="wallMessage" placeholder="Write on wall..." rows="2"></textarea>
+                    <button class="btn-primary" onclick="postToWall()">Post</button>
+                </div>
+                <div class="wall-posts" id="wallPosts">
+                    <!-- Wall posts will be loaded here -->
+                </div>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-secondary" onclick="closeModal('userProfileModal')">Close</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Image Viewer Modal -->
+    <div class="modal-overlay" id="imageViewerModal" style="display:none;" onclick="closeModal('imageViewerModal')">
+        <img src="" class="full-image" id="fullImage" alt="" onclick="event.stopPropagation()">
+        <button class="close-viewer" onclick="closeModal('imageViewerModal')">×</button>
+    </div>
+    
+    <script src="/static/js/main.js"></script>
+    <script>
+        // Initialize with current user data
+        window.currentUser = {
+            id: {{ user.id }},
+            username: "{{ user.username }}",
+            display_name: "{{ user.display_name }}",
+            avatar_url: "{{ user.avatar_url }}",
+            role: "{{ user.role }}"
+        };
+    </script>
+</body>
+</html>
