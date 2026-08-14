@@ -1,0 +1,12 @@
+```
+# Database files
+*.db
+
+# Uploads directory
+uploads/
+
+# Environment variables
+.env
+.env.local
+*.env.*
+```
