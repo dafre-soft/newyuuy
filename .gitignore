@@ -1,6 +1,6 @@
-```
-# Database
-chat_database.db
+```gitignore
+# Database files
+*.db
 
 # Environment variables
 .env
@@ -9,86 +9,45 @@ chat_database.db
 
 # Dependencies
 node_modules/
-
-# Python
+.venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.Python
-env/
-venv/
-.venv/
-.venv.bak/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-*.pot
-*.po
-*~
-.pytest_cache/
-.mypy_cache/
-.hypothesis/
 
-# Build artifacts
+# Build outputs
 dist/
 build/
-*.egg-info/
-.eggs/
-.installed.cfg
-lib/
-lib64/
-
-# IDE and editor files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+target/
 
 # Logs
 *.log
 
-# Uploads (excluding the initial notification.wav which appears to be part of the codebase)
-uploads/
+# OS generated files
+.DS_Store
+Thumbs.db
 
-# Compiled files
-*.class
-*.o
-*.a
-*.obj
-*.so
-*.dll
-*.exe
-*.out
-*.dylib
-*.jar
-*.war
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
+
+# Compressed files
 *.zip
-*.tar.gz
-*.tgz
-*.tar
 *.gz
-*.rar
-*.7z
+*.tar
+*.tgz
 *.bz2
 *.xz
+*.7z
+*.rar
 *.zst
 *.lz4
 *.lzh
@@ -99,10 +58,8 @@ uploads/
 *.Z
 *.lz
 *.lzo
-
-# Testing
-.coverage
-htmlcov/
-.cov
-coverage/
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
 ```

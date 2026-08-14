@@ -2598,3 +2598,248 @@ def bot_send_friend_request():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
+# ============ ADDITIONAL API ENDPOINTS FOR TELEGRAM-STYLE GUI ============
+
+@app.route('/api/friends')
+@login_required
+def get_friends():
+    """Get user's friends list"""
+    conn = get_db()
+    me = flask_session['user_id']
+    
+    # Get accepted friendships
+    friends = conn.execute('''
+        SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_online
+        FROM users u
+        JOIN friendships f ON 
+            (f.requester_id = ? AND f.target_id = u.id) OR
+            (f.target_id = ? AND f.requester_id = u.id)
+        WHERE f.status = 'accepted' AND u.id != ?
+        ORDER BY u.is_online DESC, u.username ASC
+    ''', (me, me, me)).fetchall()
+    
+    conn.close()
+    return jsonify({
+        "friends": [dict(f) for f in friends]
+    })
+
+@app.route('/api/chats')
+@login_required
+def get_chats():
+    """Get recent chats for sidebar"""
+    conn = get_db()
+    me = flask_session['user_id']
+    
+    # Get recent private chats
+    chats = conn.execute('''
+        SELECT 
+            m.target_id as chat_id,
+            m.chat_type,
+            CASE WHEN m.chat_type = 'private' THEN m.target_id ELSE m.sender_id END as user_id,
+            u.username,
+            u.display_name,
+            u.avatar_url,
+            u.is_online,
+            m.content as last_message,
+            m.timestamp,
+            0 as unread_count
+        FROM messages m
+        JOIN users u ON u.id = CASE WHEN m.chat_type = 'private' THEN m.target_id ELSE m.sender_id END
+        WHERE (m.sender_id = ? OR m.target_id = ?)
+        AND m.chat_type = 'private'
+        GROUP BY CASE WHEN m.chat_type = 'private' THEN m.target_id ELSE m.sender_id END
+        ORDER BY m.timestamp DESC
+        LIMIT 20
+    ''', (me, me)).fetchall()
+    
+    conn.close()
+    return jsonify([dict(c) for c in chats])
+
+@app.route('/api/messages/private/<int:user_id>')
+@login_required
+def get_private_messages(user_id):
+    """Get private messages with a specific user"""
+    since_id = request.args.get('since_id', 0, type=int)
+    limit = request.args.get('limit', 50, type=int)
+    
+    conn = get_db()
+    me = flask_session['user_id']
+    
+    messages = conn.execute('''
+        SELECT m.*, 
+               u.username as sender_username,
+               u.display_name as sender_name,
+               u.avatar_url as sender_avatar
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        WHERE m.chat_type = 'private'
+        AND ((m.sender_id = ? AND m.target_id = ?) OR (m.sender_id = ? AND m.target_id = ?))
+        AND m.id > ?
+        ORDER BY m.id ASC
+        LIMIT ?
+    ''', (me, user_id, user_id, me, since_id, limit)).fetchall()
+    
+    conn.close()
+    return jsonify([dict(m) for m in messages])
+
+@app.route('/api/messages/group/<int:group_id>')
+@login_required
+def get_group_messages(group_id):
+    """Get messages from a group"""
+    since_id = request.args.get('since_id', 0, type=int)
+    limit = request.args.get('limit', 50, type=int)
+    
+    conn = get_db()
+    
+    messages = conn.execute('''
+        SELECT m.*, 
+               u.username as sender_username,
+               u.display_name as sender_name,
+               u.avatar_url as sender_avatar
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        WHERE m.chat_type = 'group' AND m.target_id = ?
+        AND m.id > ?
+        ORDER BY m.id ASC
+        LIMIT ?
+    ''', (group_id, since_id, limit)).fetchall()
+    
+    conn.close()
+    return jsonify([dict(m) for m in messages])
+
+@app.route('/api/send_message', methods=['POST'])
+@login_required
+def send_message():
+    """Send a private message"""
+    data = request.json
+    target_id = data.get('target_id')
+    content = data.get('content', '').strip()
+    msg_type = data.get('type', 'text')
+    
+    if not target_id or not content:
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    conn = get_db()
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn.execute('''
+        INSERT INTO messages (sender_id, chat_type, target_id, type, content, timestamp, read_by)
+        VALUES (?, 'private', ?, ?, ?, ?, '[]')
+    ''', (flask_session['user_id'], target_id, msg_type, content, timestamp))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+@app.route('/api/send_group_message', methods=['POST'])
+@login_required
+def send_group_message():
+    """Send a group message"""
+    data = request.json
+    target_id = data.get('target_id')
+    content = data.get('content', '').strip()
+    msg_type = data.get('type', 'text')
+    
+    if not target_id or not content:
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    conn = get_db()
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn.execute('''
+        INSERT INTO messages (sender_id, chat_type, target_id, type, content, timestamp, read_by)
+        VALUES (?, 'group', ?, ?, ?, ?, '[]')
+    ''', (flask_session['user_id'], target_id, msg_type, content, timestamp))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+@app.route('/api/typing', methods=['POST'])
+@login_required
+def handle_typing():
+    """Handle typing indicator (placeholder for future implementation)"""
+    # In a full implementation, this would broadcast typing status via WebSocket
+    return jsonify({"success": True})
+
+@app.route('/api/online')
+@login_required
+def update_online():
+    """Update user online status"""
+    status = request.args.get('status', 1, type=int)
+    
+    conn = get_db()
+    conn.execute('UPDATE users SET is_online=?, last_seen=CURRENT_TIMESTAMP WHERE id=?',
+                (status, flask_session['user_id']))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+@app.route('/api/upload_file', methods=['POST'])
+@login_required
+def upload_file():
+    """Handle file uploads for messages"""
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    file = request.files['file']
+    target_id = request.form.get('target_id')
+    chat_type = request.form.get('chat_type', 'private')
+    
+    if not file or not target_id:
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    # Save file
+    ext = secure_filename(file.filename).split('.')[-1].lower()
+    fname = f"msg_{flask_session['user_id']}_{int(datetime.now().timestamp())}.{ext}"
+    path = os.path.join(UPLOAD_FOLDER, fname)
+    file.save(path)
+    
+    # Create message
+    conn = get_db()
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn.execute('''
+        INSERT INTO messages (sender_id, chat_type, target_id, type, filename, url, timestamp, read_by)
+        VALUES (?, ?, ?, 'file', ?, ?, ?, '[]')
+    ''', (flask_session['user_id'], chat_type, target_id, fname, f"/uploads/{fname}", timestamp))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "url": f"/uploads/{fname}"})
+
+@app.route('/api/notifications')
+@login_required
+def get_notifications():
+    """Get user notifications"""
+    conn = get_db()
+    # Placeholder - implement actual notification logic
+    notifications = []
+    conn.close()
+    return jsonify(notifications)
+
+@app.route('/api/group/<int:group_id>')
+@login_required
+def get_group_info(group_id):
+    """Get group information"""
+    conn = get_db()
+    group = conn.execute('SELECT * FROM groups WHERE id=?', (group_id,)).fetchone()
+    
+    if not group:
+        conn.close()
+        return jsonify({"error": "Group not found"}), 404
+    
+    member_count = conn.execute('SELECT COUNT(*) as c FROM group_members WHERE group_id=?', 
+                                (group_id,)).fetchone()['c']
+    
+    conn.close()
+    
+    result = dict(group)
+    result['member_count'] = member_count
+    result['avatar_url'] = '/static/default_avatar.png'  # Groups don't have avatars by default
+    
+    return jsonify(result)
