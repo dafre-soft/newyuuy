@@ -9,7 +9,7 @@ import wave
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
-from flask import Flask, render_template_string, request, jsonify, send_from_directory, redirect, url_for, session as flask_session
+from flask import Flask, render_template, render_template_string, request, jsonify, send_from_directory, redirect, url_for, session as flask_session
 from werkzeug.utils import secure_filename
 from functools import wraps
 
@@ -103,6 +103,20 @@ def init_db():
         joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (group_id, user_id)
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS bots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id INTEGER NOT NULL,
+        username TEXT UNIQUE NOT NULL,
+        display_name TEXT,
+        bio TEXT DEFAULT '',
+        avatar_url TEXT DEFAULT '/static/default_avatar.png',
+        api_token TEXT UNIQUE NOT NULL,
+        webhook_url TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        commands TEXT DEFAULT '{}',
+        auto_responses TEXT DEFAULT '{}'
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS global_channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -188,6 +202,26 @@ if not os.path.exists(SOUND_FILE):
         wav.writeframes(struct.pack('<' + 'h'*len(samples), *samples))
 
 # --- ROUTES: AUTH ---
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        data = request.json if request.is_json else request.form
+        username = str(data.get('username', '')).strip()
+        password = str(data.get('password', '')).strip()
+        
+        conn = get_db()
+        user = conn.execute('SELECT * FROM users WHERE username=? AND password_hash=?', 
+                           (username, hash_password(password))).fetchone()
+        if user and not user['is_banned']:
+            flask_session['user_id'] = user['id']
+            flask_session['username'] = user['username']
+            conn.close()
+            return jsonify({"success": True, "redirect": "/"})
+        conn.close()
+        return jsonify({"error": "Invalid credentials or Banned"}), 401
+        
+    return render_template('login.html')
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -218,27 +252,7 @@ def register():
             conn.close()
             return jsonify({"error": "Username taken"}), 400
             
-    return render_template_string(AUTH_HTML, mode='register')
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        data = request.json if request.is_json else request.form
-        username = str(data.get('username', '')).strip()
-        password = str(data.get('password', '')).strip()
-        
-        conn = get_db()
-        user = conn.execute('SELECT * FROM users WHERE username=? AND password_hash=?', 
-                           (username, hash_password(password))).fetchone()
-        if user and not user['is_banned']:
-            flask_session['user_id'] = user['id']
-            flask_session['username'] = user['username']
-            conn.close()
-            return jsonify({"success": True, "redirect": "/"})
-        conn.close()
-        return jsonify({"error": "Invalid credentials or Banned"}), 401
-        
-    return render_template_string(AUTH_HTML, mode='login')
+    return render_template('register.html')
 
 @app.route('/logout')
 def logout():
@@ -257,7 +271,7 @@ def index():
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE id=?', (flask_session['user_id'],)).fetchone()
     conn.close()
-    return render_template_string(MAIN_HTML, user=user)
+    return render_template('main.html', user=user)
 
 @app.route('/api/me')
 @login_required
@@ -382,9 +396,145 @@ def friend_action():
 def get_all_users():
     conn = get_db()
     me = flask_session['user_id']
-    users = conn.execute('SELECT id, username, display_name, avatar_url FROM users WHERE id!=?', (me,)).fetchall()
+    # Get all users except me, including bots info
+    users = conn.execute('''
+        SELECT u.id, u.username, u.display_name, u.avatar_url, 
+               CASE WHEN b.id IS NOT NULL THEN 1 ELSE 0 END as is_bot
+        FROM users u
+        LEFT JOIN bots b ON b.id = u.id AND b.owner_id != ?
+        WHERE u.id != ?
+        ORDER BY u.username ASC
+    ''', (me, me)).fetchall()
     conn.close()
     return jsonify([dict(u) for u in users])
+
+@app.route('/api/bots/create', methods=['POST'])
+@login_required
+def create_bot():
+    """Create a new bot for the current user"""
+    data = request.json
+    username = str(data.get('username', '')).strip().lower()
+    display_name = str(data.get('display_name', username))
+    
+    if not username or len(username) < 3:
+        return jsonify({"error": "Invalid username"}), 400
+    
+    if not username.startswith('@'):
+        username = '@' + username
+    
+    conn = get_db()
+    owner_id = flask_session['user_id']
+    
+    # Check if username exists
+    existing = conn.execute('SELECT 1 FROM bots WHERE username=?', (username,)).fetchone()
+    if existing:
+        conn.close()
+        return jsonify({"error": "Bot username already taken"}), 400
+    
+    # Generate API token
+    api_token = 'bot_' + secrets.token_urlsafe(32)
+    
+    try:
+        conn.execute('''INSERT INTO bots 
+                       (owner_id, username, display_name, api_token) 
+                       VALUES (?, ?, ?, ?)''',
+                    (owner_id, username, display_name, api_token))
+        conn.commit()
+        
+        bot = conn.execute('SELECT * FROM bots WHERE username=?', (username,)).fetchone()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "bot": {
+                "id": bot['id'],
+                "username": bot['username'],
+                "display_name": bot['display_name'],
+                "api_token": bot['api_token']
+            },
+            "message": f"Bot {username} created successfully!"
+        })
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "Failed to create bot"}), 500
+
+@app.route('/api/my_bots')
+@login_required
+def get_my_bots():
+    """Get all bots owned by current user"""
+    conn = get_db()
+    owner_id = flask_session['user_id']
+    bots = conn.execute('''
+        SELECT id, username, display_name, api_token, is_active, created_at, webhook_url
+        FROM bots WHERE owner_id=?
+    ''', (owner_id,)).fetchall()
+    conn.close()
+    
+    return jsonify([{
+        "id": bot['id'],
+        "username": bot['username'],
+        "display_name": bot['display_name'],
+        "api_token": bot['api_token'],
+        "is_active": bool(bot['is_active']),
+        "created_at": bot['created_at'],
+        "webhook_url": bot['webhook_url']
+    } for bot in bots])
+
+@app.route('/api/bot/update', methods=['POST'])
+@login_required
+def update_bot():
+    """Update bot settings"""
+    data = request.json
+    bot_id = data.get('bot_id')
+    owner_id = flask_session['user_id']
+    
+    conn = get_db()
+    # Verify ownership
+    bot = conn.execute('SELECT * FROM bots WHERE id=? AND owner_id=?', (bot_id, owner_id)).fetchone()
+    if not bot:
+        conn.close()
+        return jsonify({"error": "Bot not found or no permission"}), 404
+    
+    updates = []
+    params = []
+    
+    if 'display_name' in data:
+        updates.append('display_name=?')
+        params.append(data['display_name'][:50])
+    if 'bio' in data:
+        updates.append('bio=?')
+        params.append(data['bio'][:500])
+    if 'webhook_url' in data:
+        updates.append('webhook_url=?')
+        params.append(data['webhook_url'][:500])
+    if 'commands' in data:
+        updates.append('commands=?')
+        params.append(json.dumps(data['commands']))
+    if 'auto_responses' in data:
+        updates.append('auto_responses=?')
+        params.append(json.dumps(data['auto_responses']))
+    
+    if updates:
+        params.append(bot_id)
+        conn.execute(f"UPDATE bots SET {', '.join(updates)} WHERE id=?", params)
+        conn.commit()
+    
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/bot/delete', methods=['POST'])
+@login_required
+def delete_bot():
+    """Deactivate a bot"""
+    data = request.json
+    bot_id = data.get('bot_id')
+    owner_id = flask_session['user_id']
+    
+    conn = get_db()
+    conn.execute('UPDATE bots SET is_active=0 WHERE id=? AND owner_id=?', (bot_id, owner_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "message": "Bot deactivated"})
 
 @app.route('/api/notifications')
 @login_required
@@ -447,7 +597,7 @@ def get_chats():
     conn = get_db()
     uid = flask_session['user_id']
     
-    # Get private chats (friends only)
+    # Get private chats (friends only) - include bots too
     privates = conn.execute('''
          SELECT DISTINCT 
              CASE WHEN m.sender_id = ? THEN m.target_id ELSE m.sender_id END as other_id,
@@ -461,10 +611,11 @@ def get_chats():
          FROM messages m
          JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.target_id ELSE m.sender_id END
          WHERE m.chat_type='private' AND (m.sender_id=? OR m.target_id=?)
-         AND EXISTS (SELECT 1 FROM friendships WHERE requester_id=? AND target_id=u.id AND status='accepted'
+         AND (EXISTS (SELECT 1 FROM friendships WHERE requester_id=? AND target_id=u.id AND status='accepted'
                      UNION SELECT 1 FROM friendships WHERE requester_id=u.id AND target_id=? AND status='accepted')
+              OR EXISTS (SELECT 1 FROM bots WHERE owner_id=? AND id=u.id))
          ORDER BY last_ts DESC
-     ''', [uid]*10).fetchall()
+     ''', [uid]*11).fetchall()
      
     channels = conn.execute('SELECT * FROM global_channels ORDER BY name ASC').fetchall()
     
@@ -966,15 +1117,24 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-s
 
 /* Friends List in Sidebar (Telegram-style) */
 .friends-section { padding: 8px 0; border-bottom: 1px solid var(--border); }
-.friends-section-title { padding: 8px 16px; font-size: 0.75rem; color: var(--sub); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+.friends-section-title { padding: 8px 16px; font-size: 0.75rem; color: var(--sub); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; display:flex; justify-content:space-between; align-items:center; }
 .list-container { flex:1; overflow-y:auto; position:relative; }
-.list-item { padding:12px 16px; display:flex; align-items:center; gap:12px; cursor:pointer; border-bottom:1px solid rgba(45,36,82,0.3); transition:0.2s; }
+.list-item { padding:12px 16px; display:flex; align-items:center; gap:12px; cursor:pointer; border-bottom:1px solid rgba(45,36,82,0.3); transition:0.2s; position:relative; }
 .list-item:hover, .list-item.active { background:rgba(167,139,250,0.1); border-left:3px solid var(--accent); padding-left:13px; }
 .list-item img { width:40px; height:40px; border-radius:50%; object-fit:cover; background:#231b42; }
 .list-info { flex:1; min-width:0; }
 .list-name { font-weight:600; font-size:0.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .list-preview { font-size:0.75rem; color:var(--sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
 .online-dot { width:8px; height:8px; border-radius:50%; background:#6ee7b7; box-shadow:0 0 6px #6ee7b7; }
+.bot-badge { font-size:0.6rem; background:var(--accent); color:white; padding:2px 6px; border-radius:4px; margin-left:6px; }
+
+/* User Search Item Styles */
+.user-search-item { display:flex; align-items:center; gap:12px; padding:10px; border-bottom:1px solid rgba(45,36,82,0.3); transition:0.2s; }
+.user-search-item:hover { background:rgba(167,139,250,0.1); }
+.user-search-item img { width:40px; height:40px; border-radius:50%; object-fit:cover; }
+.user-search-info { flex:1; min-width:0; }
+.user-search-name { font-weight:600; font-size:0.9rem; }
+.user-search-status { font-size:0.75rem; color:var(--sub); }
 
 .sidebar-footer { padding:12px; border-top:1px solid var(--border); display:flex; gap:8px; }
 .sidebar-footer button, .sidebar-footer a { flex:1; padding:8px; border-radius:8px; border:1px solid var(--border); background:transparent; color:var(--sub); cursor:pointer; font-size:0.8rem; text-align:center; text-decoration:none; display:flex; align-items:center; justify-content:center; transition:0.2s; }
@@ -1207,7 +1367,10 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-s
     
     <!-- Friends List Section (Telegram-style) - Shows in sidebar for DMs tab -->
     <div class="friends-section" id="friendsSection" style="display:none;">
-        <div class="friends-section-title">Friends</div>
+        <div class="friends-section-title">
+            <span>Friends & Chats</span>
+            <button onclick="openAddDmModal()" style="background:var(--accent);color:white;border:none;width:24px;height:24px;border-radius:50%;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>
+        </div>
     </div>
     
     <div class="list-container" id="chatList"></div>
@@ -1318,7 +1481,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-s
         } else if (type === 'private') {
             inputBar.style.display = 'none'; // Hide input until a specific DM is selected
             document.getElementById('chatTitle').innerText = 'Direct Messages';
-            btnAddDm.style.display = 'flex'; // Show + button
+            btnAddDm.style.display = 'none'; // Hide header + button (now in sidebar)
             
             // Show friends section in sidebar
             document.getElementById('friendsSection').style.display = 'block';
@@ -1334,7 +1497,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-s
                 messagesArea.innerHTML = `<div style="text-align:center;color:var(--sub);padding:40px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;">
                     <div style="font-size:3rem;margin-bottom:16px;">💬</div>
                     <div>No conversations yet.</div>
-                    <div>Click the <b>+</b> button above to start chatting!</div>
+                    <div>Click the <b>+</b> button in the sidebar to start chatting!</div>
                 </div>`;
             } else {
                 // Populate sidebar with friends list
@@ -1349,12 +1512,18 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-s
                     </div>`;
                 });
                 
-                // Show placeholder in main area
-                messagesArea.innerHTML = `<div style="text-align:center;color:var(--sub);padding:40px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;">
-                    <div style="font-size:4rem;margin-bottom:20px;">👋</div>
-                    <div style="font-size:1.2rem;font-weight:600;margin-bottom:8px;">Welcome to YuuY Chat!</div>
-                    <div>Select a friend from the list on the left to start messaging</div>
-                </div>`;
+                // Auto-select first chat if available
+                if(data.privates.length > 0) {
+                    const first = data.privates[0];
+                    startPrivateChat(first.other_id, esc(first.display_name||first.username), first.avatar_url);
+                } else {
+                    // Show placeholder in main area
+                    messagesArea.innerHTML = `<div style="text-align:center;color:var(--sub);padding:40px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+                        <div style="font-size:4rem;margin-bottom:20px;">👋</div>
+                        <div style="font-size:1.2rem;font-weight:600;margin-bottom:8px;">Welcome to YuuY Chat!</div>
+                        <div>Select a friend from the list on the left to start messaging</div>
+                    </div>`;
+                }
             }
             
         } else if (type === 'groups') {
@@ -1420,31 +1589,75 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-s
         selectChat('private', uid, null);
     }
 
-    // NEW: Open Add DM Modal
+    // NEW: Open Add DM Modal with Bot Support
     async function openAddDmModal() {
         const res = await fetch('/api/all_users');
         const users = await res.json();
         
-        // Filter out people who are already friends/have chats? 
-        // For simplicity, show all non-friends or just all users. Let's show all for now.
-        
         const m = document.getElementById('modalContent');
         m.innerHTML = `
             <h3>Start New Chat</h3>
-            <div style="max-height:300px;overflow-y:auto;">
+            <input type="text" id="userSearch" placeholder="Search users..." style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:white;margin-bottom:12px;" oninput="filterUsers()">
+            <div id="userList" style="max-height:300px;overflow-y:auto;">
                 ${users.map(u => `
                     <div class="user-search-item" style="cursor:pointer;" onclick="startPrivateChat(${u.id}, '${esc(u.display_name||u.username)}', '${u.avatar_url}'); closeModal();">
                         <img src="${u.avatar_url}">
                         <div class="user-search-info">
-                            <div class="user-search-name">${esc(u.display_name||u.username)}</div>
+                            <div class="user-search-name">${esc(u.display_name||u.username)} ${u.is_bot ? '<span class="bot-badge">BOT</span>' : ''}</div>
                             <div class="user-search-status">@${esc(u.username)}</div>
                         </div>
                     </div>
                 `).join('')}
             </div>
-            <div class="modal-btns"><button class="btn-secondary" onclick="closeModal()">Close</button></div>
+            <div class="modal-btns">
+                <button class="btn-secondary" onclick="closeModal()">Close</button>
+                <button class="btn-primary" onclick="openCreateBotModal()">+ Create Bot</button>
+            </div>
         `;
         document.getElementById('modalOverlay').style.display = 'flex';
+    }
+    
+    function filterUsers() {
+        const query = document.getElementById('userSearch').value.toLowerCase();
+        const items = document.querySelectorAll('.user-search-item');
+        items.forEach(item => {
+            const text = item.textContent.toLowerCase();
+            item.style.display = text.includes(query) ? 'flex' : 'none';
+        });
+    }
+    
+    async function openCreateBotModal() {
+        const m = document.getElementById('modalContent');
+        m.innerHTML = `
+            <h3>Create New Bot</h3>
+            <label>Bot Username (starts with @)</label>
+            <input id="botUsername" placeholder="@mybot">
+            <label>Display Name</label>
+            <input id="botDisplayName" placeholder="My Awesome Bot">
+            <div class="modal-btns">
+                <button class="btn-secondary" onclick="openAddDmModal()">Back</button>
+                <button class="btn-primary" onclick="createBotFromUI()">Create Bot</button>
+            </div>
+        `;
+    }
+    
+    async function createBotFromUI() {
+        const username = document.getElementById('botUsername').value;
+        const displayName = document.getElementById('botDisplayName').value || username;
+        
+        const res = await fetch('/api/bots/create', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username, display_name: displayName})
+        });
+        const data = await res.json();
+        
+        if(data.success) {
+            alert(`Bot created successfully!\n\nUsername: ${data.bot.username}\nAPI Token: ${data.bot.api_token}\n\nSave this token! You'll need it for bot API access.`);
+            openAddDmModal();
+        } else {
+            alert('Error: ' + data.error);
+        }
     }
 
     async function loadFeed() {
@@ -2385,3 +2598,248 @@ def bot_send_friend_request():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
+# ============ ADDITIONAL API ENDPOINTS FOR TELEGRAM-STYLE GUI ============
+
+@app.route('/api/friends')
+@login_required
+def get_friends():
+    """Get user's friends list"""
+    conn = get_db()
+    me = flask_session['user_id']
+    
+    # Get accepted friendships
+    friends = conn.execute('''
+        SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_online
+        FROM users u
+        JOIN friendships f ON 
+            (f.requester_id = ? AND f.target_id = u.id) OR
+            (f.target_id = ? AND f.requester_id = u.id)
+        WHERE f.status = 'accepted' AND u.id != ?
+        ORDER BY u.is_online DESC, u.username ASC
+    ''', (me, me, me)).fetchall()
+    
+    conn.close()
+    return jsonify({
+        "friends": [dict(f) for f in friends]
+    })
+
+@app.route('/api/chats')
+@login_required
+def get_chats():
+    """Get recent chats for sidebar"""
+    conn = get_db()
+    me = flask_session['user_id']
+    
+    # Get recent private chats
+    chats = conn.execute('''
+        SELECT 
+            m.target_id as chat_id,
+            m.chat_type,
+            CASE WHEN m.chat_type = 'private' THEN m.target_id ELSE m.sender_id END as user_id,
+            u.username,
+            u.display_name,
+            u.avatar_url,
+            u.is_online,
+            m.content as last_message,
+            m.timestamp,
+            0 as unread_count
+        FROM messages m
+        JOIN users u ON u.id = CASE WHEN m.chat_type = 'private' THEN m.target_id ELSE m.sender_id END
+        WHERE (m.sender_id = ? OR m.target_id = ?)
+        AND m.chat_type = 'private'
+        GROUP BY CASE WHEN m.chat_type = 'private' THEN m.target_id ELSE m.sender_id END
+        ORDER BY m.timestamp DESC
+        LIMIT 20
+    ''', (me, me)).fetchall()
+    
+    conn.close()
+    return jsonify([dict(c) for c in chats])
+
+@app.route('/api/messages/private/<int:user_id>')
+@login_required
+def get_private_messages(user_id):
+    """Get private messages with a specific user"""
+    since_id = request.args.get('since_id', 0, type=int)
+    limit = request.args.get('limit', 50, type=int)
+    
+    conn = get_db()
+    me = flask_session['user_id']
+    
+    messages = conn.execute('''
+        SELECT m.*, 
+               u.username as sender_username,
+               u.display_name as sender_name,
+               u.avatar_url as sender_avatar
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        WHERE m.chat_type = 'private'
+        AND ((m.sender_id = ? AND m.target_id = ?) OR (m.sender_id = ? AND m.target_id = ?))
+        AND m.id > ?
+        ORDER BY m.id ASC
+        LIMIT ?
+    ''', (me, user_id, user_id, me, since_id, limit)).fetchall()
+    
+    conn.close()
+    return jsonify([dict(m) for m in messages])
+
+@app.route('/api/messages/group/<int:group_id>')
+@login_required
+def get_group_messages(group_id):
+    """Get messages from a group"""
+    since_id = request.args.get('since_id', 0, type=int)
+    limit = request.args.get('limit', 50, type=int)
+    
+    conn = get_db()
+    
+    messages = conn.execute('''
+        SELECT m.*, 
+               u.username as sender_username,
+               u.display_name as sender_name,
+               u.avatar_url as sender_avatar
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        WHERE m.chat_type = 'group' AND m.target_id = ?
+        AND m.id > ?
+        ORDER BY m.id ASC
+        LIMIT ?
+    ''', (group_id, since_id, limit)).fetchall()
+    
+    conn.close()
+    return jsonify([dict(m) for m in messages])
+
+@app.route('/api/send_message', methods=['POST'])
+@login_required
+def send_message():
+    """Send a private message"""
+    data = request.json
+    target_id = data.get('target_id')
+    content = data.get('content', '').strip()
+    msg_type = data.get('type', 'text')
+    
+    if not target_id or not content:
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    conn = get_db()
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn.execute('''
+        INSERT INTO messages (sender_id, chat_type, target_id, type, content, timestamp, read_by)
+        VALUES (?, 'private', ?, ?, ?, ?, '[]')
+    ''', (flask_session['user_id'], target_id, msg_type, content, timestamp))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+@app.route('/api/send_group_message', methods=['POST'])
+@login_required
+def send_group_message():
+    """Send a group message"""
+    data = request.json
+    target_id = data.get('target_id')
+    content = data.get('content', '').strip()
+    msg_type = data.get('type', 'text')
+    
+    if not target_id or not content:
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    conn = get_db()
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn.execute('''
+        INSERT INTO messages (sender_id, chat_type, target_id, type, content, timestamp, read_by)
+        VALUES (?, 'group', ?, ?, ?, ?, '[]')
+    ''', (flask_session['user_id'], target_id, msg_type, content, timestamp))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+@app.route('/api/typing', methods=['POST'])
+@login_required
+def handle_typing():
+    """Handle typing indicator (placeholder for future implementation)"""
+    # In a full implementation, this would broadcast typing status via WebSocket
+    return jsonify({"success": True})
+
+@app.route('/api/online')
+@login_required
+def update_online():
+    """Update user online status"""
+    status = request.args.get('status', 1, type=int)
+    
+    conn = get_db()
+    conn.execute('UPDATE users SET is_online=?, last_seen=CURRENT_TIMESTAMP WHERE id=?',
+                (status, flask_session['user_id']))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+@app.route('/api/upload_file', methods=['POST'])
+@login_required
+def upload_file():
+    """Handle file uploads for messages"""
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    file = request.files['file']
+    target_id = request.form.get('target_id')
+    chat_type = request.form.get('chat_type', 'private')
+    
+    if not file or not target_id:
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    # Save file
+    ext = secure_filename(file.filename).split('.')[-1].lower()
+    fname = f"msg_{flask_session['user_id']}_{int(datetime.now().timestamp())}.{ext}"
+    path = os.path.join(UPLOAD_FOLDER, fname)
+    file.save(path)
+    
+    # Create message
+    conn = get_db()
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn.execute('''
+        INSERT INTO messages (sender_id, chat_type, target_id, type, filename, url, timestamp, read_by)
+        VALUES (?, ?, ?, 'file', ?, ?, ?, '[]')
+    ''', (flask_session['user_id'], chat_type, target_id, fname, f"/uploads/{fname}", timestamp))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "url": f"/uploads/{fname}"})
+
+@app.route('/api/notifications')
+@login_required
+def get_notifications():
+    """Get user notifications"""
+    conn = get_db()
+    # Placeholder - implement actual notification logic
+    notifications = []
+    conn.close()
+    return jsonify(notifications)
+
+@app.route('/api/group/<int:group_id>')
+@login_required
+def get_group_info(group_id):
+    """Get group information"""
+    conn = get_db()
+    group = conn.execute('SELECT * FROM groups WHERE id=?', (group_id,)).fetchone()
+    
+    if not group:
+        conn.close()
+        return jsonify({"error": "Group not found"}), 404
+    
+    member_count = conn.execute('SELECT COUNT(*) as c FROM group_members WHERE group_id=?', 
+                                (group_id,)).fetchone()['c']
+    
+    conn.close()
+    
+    result = dict(group)
+    result['member_count'] = member_count
+    result['avatar_url'] = '/static/default_avatar.png'  # Groups don't have avatars by default
+    
+    return jsonify(result)

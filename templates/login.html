@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YuuY Chat - Login</title>
+    <link rel="icon" href="/static/favicon.ico">
+    <link rel="stylesheet" href="/static/css/auth.css">
+</head>
+<body>
+    <div class="auth-box">
+        <h2 id="authTitle">YuuY Login</h2>
+        <form id="authForm">
+            <input type="text" id="username" placeholder="Username" required autocomplete="off">
+            <input type="password" id="password" placeholder="Password" required>
+            <button type="submit" id="authBtn">Login</button>
+        </form>
+        <div class="switch" id="authSwitch">
+            No account? <a href="/register">Register</a>
+        </div>
+    </div>
+    <script src="/static/js/auth.js"></script>
+</body>
+</html>
